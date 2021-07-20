@@ -1,51 +1,151 @@
-import os
+import sys
+import argparse
 import json
-import pathlib
+import os
+from collections import OrderedDict
+
 import pandas as pd
-from pandas_profiling import ProfileReport
+import numpy as np
+import xlrd
 
-DATA_FOLDER = "sample-data"
+class NpEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, np.integer):
+            return int(obj)
+        elif isinstance(obj, np.floating):
+            return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        else:
+            return super(NpEncoder, self).default(obj)
 
-#######################################################################
-# # WhiteRabbit Export to JSON
-WR_SCAN_EXCEL_FILE = "sample-data/reports/whiterabbit/ScanReport.xlsx"
-wr_scan_report = pd.read_excel(WR_SCAN_EXCEL_FILE, None)
-
-# Create missing folders if needed
-pathlib.Path(os.path.join(DATA_FOLDER, "reports", "whiterabbit")).mkdir(parents=True, exist_ok=True) 
-
-for sheet_name in wr_scan_report.keys():
-    print("Reading WhiteRabbit Sheet:", sheet_name)
-    sheet = pd.read_excel(WR_SCAN_EXCEL_FILE, sheet_name=sheet_name)
-    folder = os.path.dirname(WR_SCAN_EXCEL_FILE)
-    json_filename = os.path.splitext(sheet_name)[0] + ".json"
-    print("Writing WhiteRabbite Profile:", json_filename)
-    with open(os.path.join(folder,json_filename), 'w') as json_file:
-        json.dump(sheet.to_dict(), json_file)
-
-#######################################################################
-
-#######################################################################
-# Pandas-Profiling export to JSON
-SAMPLE_DATA_FILES = [f for f in os.listdir(DATA_FOLDER) if os.path.isfile(os.path.join(DATA_FOLDER,f)) and f not in ['.DS_Store', 'sample-data.zip']]
-
-# Create missing folders if needed
-pathlib.Path(os.path.join(DATA_FOLDER, "reports", "pandas-profiling")).mkdir(parents=True, exist_ok=True) 
-
-for file in SAMPLE_DATA_FILES:
-    print("Reading file:", file)
-    df = pd.read_csv(os.path.join(DATA_FOLDER,file))
-    print("Generating Profile:", file)
-    profile = ProfileReport(df, title=file)
-    profile_filename = os.path.splitext(file)[0]
+def parse_wr_overview_sheet(filename, sheet_name='Overview', DATA=None):
+    DATA = DATA if DATA else {}
+    try:
+        sheet = pd.read_excel(filename, sheet_name='Overview')
+    except xlrd.biffh.XLRDError:
+        sheet = parse_wr_overview_sheet(filename, 'Field Overview', DATA)
     
-    print("Writing profile report:", os.path.join(DATA_FOLDER, "reports", "pandas-profiling", profile_filename))
-    # Write HTML report
-    profile_filename_html = profile_filename + ".html"
-    profile.to_file(os.path.join(DATA_FOLDER, "reports", "pandas-profiling",profile_filename_html))
-    # JSON Profile
-    profile_filename_json = profile_filename + ".json"
-    with open(os.path.join(DATA_FOLDER, "reports", "pandas-profiling", profile_filename_json), 'w') as profile_json:
-        profile_json.write(profile.to_json())
+    sheet = pd.DataFrame(sheet)
 
-#######################################################################
+
+    for i, row in sheet.iterrows():
+        if not pd.isnull(row['Table']):
+            TABLE = row['Table']
+            DATA.setdefault(TABLE, OrderedDict([
+                ('name', TABLE),
+            ]))
+            DATA[TABLE][row['Field']] = OrderedDict({
+                'field': row.get('Field', ""),
+                'type': row.get('Type', ""),
+                'decription': row.get('Description', ""),
+                'length': int(row.get('Max length', -1)),
+                'rows': int(row.get('N rows', -1)),
+                'rows_checked': int(row.get('N rows checked', -1)),
+                'emptiness': row.get('Fraction empty', -1),
+                'uniqeness': row.get('Fraction unique', -1),
+                'statistics': {
+                    'mean': row.get('Average', -1),
+                    'standard_deviation': row.get('Standard Deviation', -1),
+                    'min': row.get('Min', -1),
+                    '25_percentile': row.get('25%', -1),
+                    'median': row.get('Median', -1),
+                    '75_percentile': row.get('75%', -1),
+                    'max': row.get('Max', -1),
+                }
+                
+
+            })
+    
+    return DATA
+
+def parse_wr_table_sheet(filename, table_name):
+    DATA = OrderedDict()
+    # BUG: WhiteRabbit Profile truncates sheet name :O
+    sheets = pd.read_excel(filename, None)
+    for sheet_name in sheets.keys():
+        if table_name.startswith(sheet_name):
+            table_name = sheet_name
+            break
+    
+    sheet = pd.read_excel(filename, sheet_name=table_name)
+    sheet = pd.DataFrame(sheet)
+
+    # loop through columns two at a time
+    column_length = len(sheet.columns)
+    for i in range(1,column_length+1,2):
+        # extract first two columns
+        value_freq = sheet.iloc[:, :i+1]
+        # extract first field
+        values = value_freq.iloc[:, i-1]
+        freqs = value_freq.iloc[:, i]
+
+        not_nan_values = values.dropna()
+        not_nan_freqs = freqs.dropna()
+        if len(not_nan_values) or len(not_nan_freqs):
+            DATA.setdefault(values.name, OrderedDict())
+            
+            for index, value in values.items():
+                value = None if pd.isnull(value) else value
+                DATA[values.name][value] = None if pd.isnull(freqs[index]) else freqs[index]
+                if str(value).startswith('List truncated'):
+                    break
+    return DATA
+
+def merge_frequency_table(overview_table, frequency_table):
+    for field, value in frequency_table.items():
+        overview_table[field]['frequencies'] = value
+    return overview_table
+
+def parse_wr_report(filename):
+    data  = parse_wr_overview_sheet(filename)
+    tables = list(data.keys())
+
+    for table in tables:
+        freq_table = parse_wr_table_sheet(filename, table)
+        data[table] = merge_frequency_table(data[table], freq_table)
+    return data
+
+def read_json(filename):
+    with open(filename, 'r') as file:
+        return json.load(file)
+
+def write_json(data, filename=None, indent=2):
+   with (open(filename, 'w') if filename else sys.stdout) as file:
+        json.dump(data, file, indent=indent, cls=NpEncoder)
+
+def main(args):
+    PID = args['pid']
+    FILE = args['FILE']
+    OUTPUT = args['out']
+    if not PID and FILE.startswith('profiles/'):
+        _, PID, filename = FILE.split('/')
+        OUTPUT = os.path.join("profiles", PID)
+    
+    OUT_FILENAME = PID + ".white_rabbit.profile.json"
+    if not OUTPUT:
+        OUTPUT = os.path.join("./", OUT_FILENAME)
+    else:
+        OUTPUT = os.path.join(OUTPUT, OUT_FILENAME)
+    
+    data = parse_wr_report(args['FILE'])
+    data = {
+        'pid': PID,
+        'dataClasses': data
+    }
+    write_json(data, OUTPUT)
+
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(prog="profile2json", 
+                                     description='Process data profile reports into a json format')
+    parser.add_argument('FILE', type=str, help='Data profile file')
+    parser.add_argument('--pid', type=str, help="Dataset PID")
+    parser.add_argument('--format', type=str, help="Profile format")
+    parser.add_argument('--out', type=str, help="Output path")
+
+    args = parser.parse_args()
+    print(vars(args))
+
+    sys.exit(main(vars(args)))
