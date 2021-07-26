@@ -97,6 +97,19 @@ def merge_frequency_table(overview_table, frequency_table):
         overview_table[field]['frequencies'] = value
     return overview_table
 
+def dicts_to_lists(data):
+    DATA = []
+    for dc_name, dc in data.items():
+        DC = OrderedDict({
+            'name': dc_name,
+            'dataElements': []
+        })
+        for de_name, de in dc.items():
+            if de_name != "name":
+                DC['dataElements'].append(de)
+        DATA.append(DC)
+    return DATA
+
 def parse_wr_report(filename):
     data  = parse_wr_overview_sheet(filename)
     tables = list(data.keys())
@@ -104,6 +117,9 @@ def parse_wr_report(filename):
     for table in tables:
         freq_table = parse_wr_table_sheet(filename, table)
         data[table] = merge_frequency_table(data[table], freq_table)
+    
+    data = dicts_to_lists(data)
+
     return data
 
 def read_json(filename):
@@ -146,6 +162,6 @@ if __name__ == '__main__':
     parser.add_argument('--out', type=str, help="Output path")
 
     args = parser.parse_args()
-    print(vars(args))
+    # print(vars(args))
 
     sys.exit(main(vars(args)))
